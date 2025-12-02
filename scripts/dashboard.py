@@ -1,8 +1,11 @@
+# scripts/dashboard.py
+
 import os
 import pandas as pd
 import streamlit as st
 from analysis import process_dataset
 
+# ---- paths ----
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 DATASETS = {
@@ -17,6 +20,25 @@ st.set_page_config(
 )
 
 
+def _to_df(obj):
+    """
+    Normalize result objects to DataFrame when possible.
+
+    - If obj is a DataFrame -> return as is.
+    - If obj is a dict (like {'date': [...], 'revenue_usd': [...]})
+      -> convert to DataFrame.
+    - Otherwise -> return None.
+    """
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    if isinstance(obj, dict):
+        try:
+            return pd.DataFrame(obj)
+        except Exception:
+            return None
+    return None
+
+
 def render_dataset(name: str, folder: str):
     st.header(f"Results for {name}")
 
@@ -26,41 +48,55 @@ def render_dataset(name: str, folder: str):
         st.error(f"Error while processing {name}: {e}")
         return
 
-    df = result["df"]
-    daily_revenue = result["daily_revenue"]
-    top5_days = result["top5_days"]
-    unique_users = result["unique_users"]
-    unique_author_sets = result["unique_author_sets"]
-    popular_authors = result["popular_authors"]
-    best_key = result["best_buyer_key"]
-    best_revenue = result["best_buyer_revenue"]
-    best_aliases = result["best_buyer_aliases"]
+    # ---- unpack results ----
+    df = result.get("df")
+    daily_revenue_raw = result.get("daily_revenue")
+    top5_days_raw = result.get("top5_days")
+    unique_users = result.get("unique_users", 0)
+    unique_author_sets = result.get("unique_author_sets", 0)
+    popular_authors = result.get("popular_authors", [])
+    best_key = result.get("best_buyer_key")
+    best_revenue = result.get("best_buyer_revenue")
+    best_aliases = result.get("best_buyer_aliases")
+
+    # normalise to DataFrames (handles dicts safely)
+    top5_days = _to_df(top5_days_raw)
+    daily_revenue = _to_df(daily_revenue_raw)
 
     # --- top metrics row ---
     col1, col2, col3 = st.columns(3)
 
-    # Top 5 days
+    # 1) Top 5 days by revenue
     with col1:
         st.subheader("Top 5 Days by Revenue (YYYY-MM-DD)")
         if top5_days is not None and not top5_days.empty:
             top5_display = top5_days.copy()
-            top5_display["date"] = top5_display["date"].astype(str)
-            top5_display = top5_display.rename(
-                columns={"date": "Date", "revenue_usd": "Revenue (USD)"}
-            )
+
+            # make sure we have the expected columns if possible
+            # (analysis.process_dataset already should give 'date' & 'revenue_usd')
+            if "date" in top5_display.columns:
+                top5_display["date"] = top5_display["date"].astype(str)
+                top5_display = top5_display.rename(
+                    columns={"date": "Date"}
+                )
+            if "revenue_usd" in top5_display.columns:
+                top5_display = top5_display.rename(
+                    columns={"revenue_usd": "Revenue (USD)"}
+                )
+
             st.dataframe(top5_display, use_container_width=True)
         else:
             st.write("No revenue data available.")
 
-    # Unique users + authors
+    # 2) Unique users + unique author sets
     with col2:
         st.subheader("Unique Users")
-        st.metric("Count", value=unique_users)
+        st.metric("Count", value=int(unique_users))
 
         st.subheader("Unique Author Sets")
-        st.metric("Count", value=unique_author_sets)
+        st.metric("Count", value=int(unique_author_sets))
 
-    # Popular authors + best buyer
+    # 3) Popular authors + best buyer
     with col3:
         st.subheader("Most Popular Author(s)")
         if popular_authors:
@@ -70,9 +106,13 @@ def render_dataset(name: str, folder: str):
             st.write("No author revenue statistics available.")
 
         st.subheader("Best Buyer (All user_id aliases)")
-        if best_key is not None:
-            st.write(f"User key: **{best_key}**")
-            st.write(f"Total revenue: **{best_revenue:.2f} USD**")
+        if best_key is not None and best_revenue is not None:
+            st.write(f"User key: **{int(best_key)}**")
+            try:
+                st.write(f"Total revenue: **{float(best_revenue):.2f} USD**")
+            except Exception:
+                st.write(f"Total revenue: **{best_revenue} USD**")
+
             st.write(f"Aliases (user_id values): {best_aliases}")
         else:
             st.write("No buyer data available.")
@@ -83,9 +123,21 @@ def render_dataset(name: str, folder: str):
     st.subheader("Daily Revenue Chart (USD)")
     if daily_revenue is not None and not daily_revenue.empty:
         chart_df = daily_revenue.copy()
-        chart_df["date"] = pd.to_datetime(chart_df["date"])
-        chart_df = chart_df.set_index("date")
-        st.line_chart(chart_df["revenue_usd"])
+
+        # expect 'date' and 'revenue_usd' columns from analysis.process_dataset
+        if "date" in chart_df.columns:
+            chart_df["date"] = pd.to_datetime(chart_df["date"])
+            chart_df = chart_df.set_index("date")
+
+        if "revenue_usd" in chart_df.columns:
+            st.line_chart(chart_df["revenue_usd"])
+        else:
+            # fallback: show all numeric columns if structure is weird
+            numeric_cols = chart_df.select_dtypes("number")
+            if not numeric_cols.empty:
+                st.line_chart(numeric_cols)
+            else:
+                st.write("No numeric revenue data to display.")
     else:
         st.write("No daily revenue data to display.")
 
