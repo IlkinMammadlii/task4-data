@@ -1,11 +1,8 @@
-# scripts/dashboard.py
-
 import os
 import pandas as pd
 import streamlit as st
 from analysis import process_dataset
 
-# ---- paths ----
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 DATASETS = {
@@ -47,8 +44,6 @@ def render_dataset(name: str, folder: str):
     except Exception as e:
         st.error(f"Error while processing {name}: {e}")
         return
-
-    # ---- unpack results ----
     df = result.get("df")
     daily_revenue_raw = result.get("daily_revenue")
     top5_days_raw = result.get("top5_days")
@@ -59,21 +54,16 @@ def render_dataset(name: str, folder: str):
     best_revenue = result.get("best_buyer_revenue")
     best_aliases = result.get("best_buyer_aliases")
 
-    # normalise to DataFrames (handles dicts safely)
     top5_days = _to_df(top5_days_raw)
     daily_revenue = _to_df(daily_revenue_raw)
 
-    # --- top metrics row ---
     col1, col2, col3 = st.columns(3)
 
-    # 1) Top 5 days by revenue
     with col1:
         st.subheader("Top 5 Days by Revenue (YYYY-MM-DD)")
         if top5_days is not None and not top5_days.empty:
             top5_display = top5_days.copy()
 
-            # make sure we have the expected columns if possible
-            # (analysis.process_dataset already should give 'date' & 'revenue_usd')
             if "date" in top5_display.columns:
                 top5_display["date"] = top5_display["date"].astype(str)
                 top5_display = top5_display.rename(
@@ -88,7 +78,6 @@ def render_dataset(name: str, folder: str):
         else:
             st.write("No revenue data available.")
 
-    # 2) Unique users + unique author sets
     with col2:
         st.subheader("Unique Users")
         st.metric("Count", value=int(unique_users))
@@ -96,7 +85,6 @@ def render_dataset(name: str, folder: str):
         st.subheader("Unique Author Sets")
         st.metric("Count", value=int(unique_author_sets))
 
-    # 3) Popular authors + best buyer
     with col3:
         st.subheader("Most Popular Author(s)")
         if popular_authors:
@@ -119,12 +107,10 @@ def render_dataset(name: str, folder: str):
 
     st.markdown("---")
 
-    # --- daily revenue chart ---
     st.subheader("Daily Revenue Chart (USD)")
     if daily_revenue is not None and not daily_revenue.empty:
         chart_df = daily_revenue.copy()
 
-        # expect 'date' and 'revenue_usd' columns from analysis.process_dataset
         if "date" in chart_df.columns:
             chart_df["date"] = pd.to_datetime(chart_df["date"])
             chart_df = chart_df.set_index("date")
@@ -132,7 +118,6 @@ def render_dataset(name: str, folder: str):
         if "revenue_usd" in chart_df.columns:
             st.line_chart(chart_df["revenue_usd"])
         else:
-            # fallback: show all numeric columns if structure is weird
             numeric_cols = chart_df.select_dtypes("number")
             if not numeric_cols.empty:
                 st.line_chart(numeric_cols)
@@ -143,7 +128,7 @@ def render_dataset(name: str, folder: str):
 
 
 def main():
-    st.title("Task 4 – Book Store Analytics")
+    st.title("Book Store Analytics")
 
     tab1, tab2, tab3 = st.tabs(["DATA1", "DATA2", "DATA3"])
     with tab1:

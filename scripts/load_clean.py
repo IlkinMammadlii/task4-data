@@ -3,18 +3,14 @@ import re
 import numpy as np
 import pandas as pd
 
-# YAML is used for books.yml
 try:
     import yaml
-except ImportError:  # pragma: no cover
+except ImportError: 
     yaml = None
 
 EUR_TO_USD = 1.07
 
 
-# ---------------------------------------------------------------------
-# TIMESTAMP CLEANING / PARSING
-# ---------------------------------------------------------------------
 def clean_timestamp(ts):
     """Normalize messy timestamp strings before parsing."""
     if not isinstance(ts, str):
@@ -22,7 +18,6 @@ def clean_timestamp(ts):
 
     ts = ts.strip()
 
-    # Normalize any variant of am/pm → AM / PM
     ts = re.sub(
         r"\b([aA][mM]|[pP][mM])\.?\b",
         lambda m: m.group(1).upper(),
@@ -35,17 +30,13 @@ def clean_timestamp(ts):
         flags=re.IGNORECASE,
     )
 
-    # Normalize capitalization of month names etc.
     ts = ts.title()
 
-    # Replace weird separators with spaces
     ts = ts.replace(";", " ")
     ts = ts.replace(",", " ")
 
-    # Collapse multiple spaces
     ts = re.sub(r"\s+", " ", ts)
 
-    # Strip trailing dot
     ts = ts.rstrip(".")
 
     return ts
@@ -64,15 +55,11 @@ def parse_timestamp(ts):
             cleaned,
             utc=False,
             errors="raise",
-            dayfirst=True,  # needed for many d-M-Y formats
+            dayfirst=True,  
         )
     except Exception as e:
         raise ValueError(f"Unknown timestamp: {raw} → {cleaned}") from e
 
-
-# ---------------------------------------------------------------------
-# PRICE PARSING
-# ---------------------------------------------------------------------
 def parse_price_to_usd(value):
     """
     Parse strings like:
@@ -88,29 +75,22 @@ def parse_price_to_usd(value):
 
     original = s
     upper = s.upper()
-
-    # Detect currency
     if "USD" in upper or "$" in s:
         currency = "USD"
     elif "EUR" in upper or "€" in s:
         currency = "EUR"
     else:
-        # Default to EUR if unknown
         currency = "EUR"
 
-    # Remove currency tokens
     s_num = original
     for token in ["USD", "EUR", "$", "€"]:
         s_num = s_num.replace(token, "")
 
-    # Handle decimal markers
     s_num = s_num.replace("¢", ".")
     s_num = s_num.replace(",", ".")
 
-    # Keep only digits and dots
     s_num = re.sub(r"[^0-9.]", "", s_num)
 
-    # If multiple dots, use last as decimal separator
     if s_num.count(".") > 1:
         parts = s_num.split(".")
         s_num = "".join(parts[:-1]) + "." + parts[-1]
@@ -129,9 +109,6 @@ def parse_price_to_usd(value):
         return val * EUR_TO_USD
 
 
-# ---------------------------------------------------------------------
-# MAIN LOADER
-# ---------------------------------------------------------------------
 def _load_books(books_path: str) -> pd.DataFrame:
     """Load books from CSV or YAML and normalize to [book_id, author_set]."""
     if books_path is None:
@@ -139,7 +116,6 @@ def _load_books(books_path: str) -> pd.DataFrame:
 
     lower = books_path.lower()
 
-    # --- read file ---
     if lower.endswith(".csv"):
         books = pd.read_csv(books_path)
     elif lower.endswith(".yml") or lower.endswith(".yaml"):
@@ -151,23 +127,19 @@ def _load_books(books_path: str) -> pd.DataFrame:
             data = yaml.safe_load(f) or []
         books = pd.DataFrame(data)
     else:
-        # unsupported extension – treat as no author info
         return pd.DataFrame(columns=["book_id", "author_set"])
-
-    # --- normalize column names: ':id' → 'id', ':author' → 'author' ---
+    
     orig_cols = list(books.columns)
     norm_cols = []
     for c in orig_cols:
         c_str = str(c).strip()
-        c_str = c_str.lstrip(":")  # drop leading colon
+        c_str = c_str.lstrip(":")  
         norm_cols.append(c_str)
     books.columns = norm_cols
 
-    # --- ensure book_id column ---
     if "book_id" not in books.columns and "id" in books.columns:
         books = books.rename(columns={"id": "book_id"})
 
-    # --- find an author column: author / authors ---
     author_col = None
     for c in books.columns:
         base = c.strip().lower()
@@ -185,11 +157,9 @@ def _load_books(books_path: str) -> pd.DataFrame:
     else:
         books["author_set"] = np.nan
 
-    # If book_id still missing, create NaNs (merge will give NaN authors)
     if "book_id" not in books.columns:
         books["book_id"] = np.nan
 
-    # Align type with orders later (numeric, but allow NA)
     books["book_id"] = pd.to_numeric(books["book_id"], errors="coerce").astype("Int64")
 
     return books[["book_id", "author_set"]]
@@ -224,14 +194,11 @@ def load_and_clean(folder_path: str) -> pd.DataFrame:
     if orders_path is None:
         raise FileNotFoundError(f"No orders file found in {folder_path}")
 
-    # --- users (not used much, but keep reading if present) ---
     if users_path and os.path.exists(users_path):
-        _ = pd.read_csv(users_path)  # reserved for future use
+        _ = pd.read_csv(users_path)  
 
-    # --- books (with authors) ---
     books = _load_books(books_path)
 
-    # --- orders ---
     if orders_path.lower().endswith(".csv"):
         orders = pd.read_csv(orders_path)
     else:
@@ -256,7 +223,6 @@ def load_and_clean(folder_path: str) -> pd.DataFrame:
         raise KeyError("orders file has no 'user_id' column")
     orders["user_key"] = orders["user_id"].astype(str)
 
-    # Align book_id types for merge
     if "book_id" in orders.columns:
         orders["book_id"] = pd.to_numeric(
             orders["book_id"], errors="coerce"
@@ -264,7 +230,6 @@ def load_and_clean(folder_path: str) -> pd.DataFrame:
     else:
         orders["book_id"] = pd.arrays.IntegerArray([pd.NA] * len(orders))
 
-    # --- merge with books to get author_set ---
     df = orders.merge(books, on="book_id", how="left")
 
     df["revenue_usd"] = df["paid_price_usd"]
