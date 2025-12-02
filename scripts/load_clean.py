@@ -1,322 +1,272 @@
+import os
 import re
-from pathlib import Path
-from typing import Any, Dict
-
 import numpy as np
 import pandas as pd
 
+# YAML is used for books.yml
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None
 
-# --- Currency assumptions ---
-EUR_TO_USD = 1.08
+EUR_TO_USD = 1.07
 
 
-# ---------- TIMESTAMP CLEANING ----------
-
-def clean_timestamp(ts: Any) -> Any:
-    """Normalize the timestamp string before parsing."""
-    if pd.isna(ts):
+# ---------------------------------------------------------------------
+# TIMESTAMP CLEANING / PARSING
+# ---------------------------------------------------------------------
+def clean_timestamp(ts):
+    """Normalize messy timestamp strings before parsing."""
+    if not isinstance(ts, str):
         return ts
-    s = str(ts).strip()
 
-    # unify whitespace
-    s = re.sub(r"\s+", " ", s)
+    ts = ts.strip()
 
-    # normalize AM/PM variants
-    s = re.sub(
+    # Normalize any variant of am/pm → AM / PM
+    ts = re.sub(
         r"\b([aA][mM]|[pP][mM])\.?\b",
         lambda m: m.group(1).upper(),
-        s,
+        ts,
     )
-    s = re.sub(r"([aA])\.?\s?m\.?", "AM", s)
-    s = re.sub(r"([pP])\.?\s?m\.?", "PM", s)
+    ts = re.sub(
+        r"([ap])\.?\s?m\.?",
+        lambda m: m.group(1).upper() + "M",
+        ts,
+        flags=re.IGNORECASE,
+    )
 
-    # normalize month names / abbreviations
-    s = s.title()
+    # Normalize capitalization of month names etc.
+    ts = ts.title()
 
-    # replace weird separators
-    s = s.replace(";", " ")
-    s = s.replace(" ,", ",")
-    s = re.sub(r"\s*,\s*", ",", s)
+    # Replace weird separators with spaces
+    ts = ts.replace(";", " ")
+    ts = ts.replace(",", " ")
 
-    # remove trailing dot
-    s = s.rstrip(".")
+    # Collapse multiple spaces
+    ts = re.sub(r"\s+", " ", ts)
 
-    return s
+    # Strip trailing dot
+    ts = ts.rstrip(".")
+
+    return ts
 
 
-def parse_timestamp(ts: Any) -> Any:
-    """Parse many crazy formats into pandas Timestamp. Return NaT on failure."""
+def parse_timestamp(ts):
+    """Convert a single raw timestamp to pandas.Timestamp."""
     if pd.isna(ts):
         return pd.NaT
 
-    s = clean_timestamp(ts)
+    raw = str(ts)
+    cleaned = clean_timestamp(raw)
 
-    # Try normal parse
     try:
-        return pd.to_datetime(s, utc=False, errors="raise")
-    except Exception:
-        pass
-
-    # Try European day-first
-    try:
-        return pd.to_datetime(s, utc=False, errors="raise", dayfirst=True)
-    except Exception:
-        pass
-
-    # Give up
-    return pd.NaT
+        return pd.to_datetime(
+            cleaned,
+            utc=False,
+            errors="raise",
+            dayfirst=True,  # needed for many d-M-Y formats
+        )
+    except Exception as e:
+        raise ValueError(f"Unknown timestamp: {raw} → {cleaned}") from e
 
 
-# ---------- PRICE CLEANING ----------
-
-def price_to_usd(raw: Any) -> float:
-    """Convert messy unit_price string into a float in USD."""
-    if pd.isna(raw):
+# ---------------------------------------------------------------------
+# PRICE PARSING
+# ---------------------------------------------------------------------
+def parse_price_to_usd(value):
+    """
+    Parse strings like:
+    '67.0 €', 'EUR26.99', '30 $', 'USD 24.99', '€43¢75', '$ 32.25', ...
+    into float USD.
+    """
+    if pd.isna(value):
         return np.nan
 
-    s = str(raw).strip()
+    s = str(value).strip()
     if not s:
         return np.nan
 
-    lower = s.lower()
-    is_usd = "usd" in lower or "$" in s
-    is_eur = "eur" in lower or "€" in s
+    original = s
+    upper = s.upper()
 
-    cleaned = (
-        s.replace("USD", "")
-        .replace("usd", "")
-        .replace("EUR", "")
-        .replace("eur", "")
-        .replace("$", "")
-        .replace("€", "")
-    )
+    # Detect currency
+    if "USD" in upper or "$" in s:
+        currency = "USD"
+    elif "EUR" in upper or "€" in s:
+        currency = "EUR"
+    else:
+        # Default to EUR if unknown
+        currency = "EUR"
 
-    # handle "€43¢75"
-    cleaned = cleaned.replace("¢", ".")
-    cleaned = cleaned.replace(",", ".")
+    # Remove currency tokens
+    s_num = original
+    for token in ["USD", "EUR", "$", "€"]:
+        s_num = s_num.replace(token, "")
 
-    m = re.search(r"(\d+(\.\d+)?)", cleaned)
-    if not m:
+    # Handle decimal markers
+    s_num = s_num.replace("¢", ".")
+    s_num = s_num.replace(",", ".")
+
+    # Keep only digits and dots
+    s_num = re.sub(r"[^0-9.]", "", s_num)
+
+    # If multiple dots, use last as decimal separator
+    if s_num.count(".") > 1:
+        parts = s_num.split(".")
+        s_num = "".join(parts[:-1]) + "." + parts[-1]
+
+    if s_num == "":
         return np.nan
 
-    amount = float(m.group(1))
+    try:
+        val = float(s_num)
+    except Exception:
+        return np.nan
 
-    if not is_usd and not is_eur:
-        is_eur = True  # default to EUR
-
-    if is_usd:
-        amount_usd = amount
+    if currency == "USD":
+        return val
     else:
-        amount_usd = amount * EUR_TO_USD
-
-    return float(amount_usd)
+        return val * EUR_TO_USD
 
 
-# ---------- BOOKS / AUTHORS HELPERS ----------
+# ---------------------------------------------------------------------
+# MAIN LOADER
+# ---------------------------------------------------------------------
+def _load_books(books_path: str) -> pd.DataFrame:
+    """Load books from CSV or YAML and normalize to [book_id, author_set]."""
+    if books_path is None:
+        return pd.DataFrame(columns=["book_id", "author_set"])
 
-def load_books(path: Path) -> pd.DataFrame:
-    books_file = None
-    for pattern in ("books.yaml", "books.yml", "books.csv", "books.parquet"):
-        candidate = path / pattern
-        if candidate.exists():
-            books_file = candidate
+    lower = books_path.lower()
+
+    # --- read file ---
+    if lower.endswith(".csv"):
+        books = pd.read_csv(books_path)
+    elif lower.endswith(".yml") or lower.endswith(".yaml"):
+        if yaml is None:
+            raise ImportError(
+                "PyYAML is required to read books.yml. Install it with 'pip install pyyaml'."
+            )
+        with open(books_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or []
+        books = pd.DataFrame(data)
+    else:
+        # unsupported extension – treat as no author info
+        return pd.DataFrame(columns=["book_id", "author_set"])
+
+    # --- normalize column names: ':id' → 'id', ':author' → 'author' ---
+    orig_cols = list(books.columns)
+    norm_cols = []
+    for c in orig_cols:
+        c_str = str(c).strip()
+        c_str = c_str.lstrip(":")  # drop leading colon
+        norm_cols.append(c_str)
+    books.columns = norm_cols
+
+    # --- ensure book_id column ---
+    if "book_id" not in books.columns and "id" in books.columns:
+        books = books.rename(columns={"id": "book_id"})
+
+    # --- find an author column: author / authors ---
+    author_col = None
+    for c in books.columns:
+        base = c.strip().lower()
+        if base in ("author", "authors"):
+            author_col = c
             break
 
-    if books_file is None:
-        return pd.DataFrame()
-
-    if books_file.suffix in {".yaml", ".yml"}:
-        import yaml
-
-        with open(books_file, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
-        books = pd.json_normalize(raw)
-    elif books_file.suffix == ".csv":
-        books = pd.read_csv(books_file)
-    else:
-        books = pd.read_parquet(books_file)
-
-    # strip leading ":" from YAML keys
-    books.columns = [c.lstrip(":") for c in books.columns]
-
-    if "authors" not in books.columns and "author" in books.columns:
-        books["authors"] = books["author"]
-
-    if "authors" in books.columns:
+    if author_col is not None:
         books["author_set"] = (
-            books["authors"]
+            books[author_col]
+            .fillna("Unknown")
             .astype(str)
             .str.strip()
-            .replace({"nan": np.nan})
         )
-
-    return books
-
-
-# ---------- MAIN LOAD + CLEAN FUNCTION ----------
-
-def load_and_clean(root: str) -> Dict[str, Any]:
-    root_path = Path(root)
-
-    # --- load orders ---
-    orders_file = None
-    for pattern in ("orders.parquet", "orders.csv"):
-        candidate = root_path / pattern
-        if candidate.exists():
-            orders_file = candidate
-            break
-    if orders_file is None:
-        raise FileNotFoundError(f"No orders file found in {root}")
-
-    if orders_file.suffix == ".parquet":
-        orders = pd.read_parquet(orders_file)
     else:
-        orders = pd.read_csv(orders_file)
+        books["author_set"] = np.nan
 
-    # --- load users ---
-    users_file = None
-    for pattern in ("users.csv", "users.parquet"):
-        candidate = root_path / pattern
-        if candidate.exists():
-            users_file = candidate
-            break
-    if users_file is None:
-        raise FileNotFoundError(f"No users file found in {root}")
+    # If book_id still missing, create NaNs (merge will give NaN authors)
+    if "book_id" not in books.columns:
+        books["book_id"] = np.nan
 
-    if users_file.suffix == ".parquet":
-        users = pd.read_parquet(users_file)
+    # Align type with orders later (numeric, but allow NA)
+    books["book_id"] = pd.to_numeric(books["book_id"], errors="coerce").astype("Int64")
+
+    return books[["book_id", "author_set"]]
+
+
+def load_and_clean(folder_path: str) -> pd.DataFrame:
+    """
+    Load users (optional), books, and orders from DATA1/2/3,
+    clean them, and return a unified DataFrame with:
+      user_id, user_key, book_id, timestamp, date,
+      unit_price_usd, paid_price_usd, author_set, revenue_usd
+    """
+    users_path = None
+    books_path = None
+    orders_path = None
+
+    for fname in os.listdir(folder_path):
+        lower = fname.lower()
+        full = os.path.join(folder_path, fname)
+
+        if lower.startswith("user") and lower.endswith(".csv"):
+            users_path = full
+        elif lower.startswith("book") and (
+            lower.endswith(".csv") or lower.endswith(".yml") or lower.endswith(".yaml")
+        ):
+            books_path = full
+        elif lower.startswith("order") and (
+            lower.endswith(".csv") or lower.endswith(".parquet")
+        ):
+            orders_path = full
+
+    if orders_path is None:
+        raise FileNotFoundError(f"No orders file found in {folder_path}")
+
+    # --- users (not used much, but keep reading if present) ---
+    if users_path and os.path.exists(users_path):
+        _ = pd.read_csv(users_path)  # reserved for future use
+
+    # --- books (with authors) ---
+    books = _load_books(books_path)
+
+    # --- orders ---
+    if orders_path.lower().endswith(".csv"):
+        orders = pd.read_csv(orders_path)
     else:
-        users = pd.read_csv(users_file)
+        orders = pd.read_parquet(orders_path)
 
-    users.columns = [c.strip().lower() for c in users.columns]
+    if "timestamp" not in orders.columns:
+        raise KeyError("orders file has no 'timestamp' column")
 
-    # --- load books ---
-    books = load_books(root_path)
-
-    # ---------- CLEAN ORDERS ----------
-    orders.columns = [c.strip().lower() for c in orders.columns]
-
-    required_cols = {"id", "user_id", "book_id", "quantity", "unit_price", "timestamp"}
-    missing = required_cols - set(orders.columns)
-    if missing:
-        raise KeyError(f"Missing columns in orders: {missing}")
-
-    # 1) parse timestamp values
     orders["timestamp"] = orders["timestamp"].apply(parse_timestamp)
-
-    # *** HARD CAST TO DATETIME to fix .dt error ***
-    orders["timestamp"] = pd.to_datetime(orders["timestamp"], errors="coerce")
-
-    # drop rows with invalid timestamp
-    orders = orders[orders["timestamp"].notna()].copy()
-
-    # date column
     orders["date"] = orders["timestamp"].dt.date
 
-    # quantity
-    orders["quantity"] = (
-        pd.to_numeric(orders["quantity"], errors="coerce")
-        .fillna(0)
-        .astype(int)
-    )
+    if "unit_price" not in orders.columns:
+        raise KeyError("orders file has no 'unit_price' column")
 
-    # price -> USD
-    orders["unit_price_usd"] = orders["unit_price"].apply(price_to_usd)
+    orders["unit_price_usd"] = orders["unit_price"].apply(parse_price_to_usd)
+    orders["quantity"] = pd.to_numeric(
+        orders.get("quantity", 1), errors="coerce"
+    ).fillna(0).astype(float)
+    orders["paid_price_usd"] = orders["unit_price_usd"] * orders["quantity"]
 
-    # paid_price
-    orders["paid_price"] = orders["quantity"] * orders["unit_price_usd"]
+    if "user_id" not in orders.columns:
+        raise KeyError("orders file has no 'user_id' column")
+    orders["user_key"] = orders["user_id"].astype(str)
 
-    # ---------- USER KEYS (ALIASES) ----------
-    users_for_merge = users.rename(columns={"id": "user_id"})
-    if "email" in users_for_merge.columns:
-        merged = orders.merge(
-            users_for_merge[["user_id", "email"]],
-            on="user_id",
-            how="left",
-            validate="m:1",
-        )
-        merged["user_key"] = merged["email"].where(
-            merged["email"].notna(), merged["user_id"].astype(str)
-        )
+    # Align book_id types for merge
+    if "book_id" in orders.columns:
+        orders["book_id"] = pd.to_numeric(
+            orders["book_id"], errors="coerce"
+        ).astype("Int64")
     else:
-        merged = orders.copy()
-        merged["user_key"] = merged["user_id"].astype(str)
+        orders["book_id"] = pd.arrays.IntegerArray([pd.NA] * len(orders))
 
-    orders = merged
+    # --- merge with books to get author_set ---
+    df = orders.merge(books, on="book_id", how="left")
 
-    # ---------- METRICS ----------
+    df["revenue_usd"] = df["paid_price_usd"]
 
-    # Top 5 days by revenue (drop full-NaN days)
-    daily_rev = (
-        orders.groupby("date", as_index=False)["paid_price"]
-        .sum(min_count=1)
-        .dropna(subset=["paid_price"])
-        .sort_values("paid_price", ascending=False)
-        .head(5)
-    )
-
-    unique_users = orders["user_key"].nunique()
-
-    # Author metrics
-    has_author_info = False
-    unique_author_sets = None
-    most_popular_authors = None
-
-    if not books.empty and "author_set" in books.columns:
-        has_author_info = True
-        unique_author_sets = books["author_set"].dropna().nunique()
-
-        if "id" in books.columns:
-            books_for_merge = books[["id", "author_set"]].rename(
-                columns={"id": "book_id"}
-            )
-            ob = orders.merge(books_for_merge, on="book_id", how="left")
-
-            author_rev = (
-                ob.dropna(subset=["author_set", "paid_price"])
-                .groupby("author_set", as_index=False)["paid_price"]
-                .sum()
-                .sort_values("paid_price", ascending=False)
-            )
-
-            if not author_rev.empty:
-                most_popular_authors = author_rev.head(3)
-        else:
-            has_author_info = False
-
-    # Best buyer
-    buyer_rev = (
-        orders.dropna(subset=["paid_price"])
-        .groupby("user_key", as_index=False)["paid_price"]
-        .sum()
-        .sort_values("paid_price", ascending=False)
-    )
-
-    if buyer_rev.empty:
-        best_buyer = None
-    else:
-        top_key = buyer_rev.iloc[0]["user_key"]
-        top_total = float(buyer_rev.iloc[0]["paid_price"])
-        aliases_raw = (
-            orders.loc[orders["user_key"] == top_key, "user_id"]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-
-        best_buyer = {
-            "user_key": top_key,
-            "total_revenue": top_total,
-            "aliases": aliases_raw,
-        }
-
-    return {
-        "orders": orders,
-        "top5_days": daily_rev,
-        "unique_users": unique_users,
-        "has_author_info": has_author_info,
-        "unique_author_sets": unique_author_sets,
-        "most_popular_authors": most_popular_authors,
-        "best_buyer": best_buyer,
-    }
+    return df
