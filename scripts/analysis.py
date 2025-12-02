@@ -2,6 +2,40 @@ import pandas as pd
 from load_clean import load_and_clean
 
 
+def _extract_orders_df(raw) -> pd.DataFrame:
+    """
+    Make sure we always work with a pandas DataFrame.
+
+    `load_and_clean()` may return:
+      - a single DataFrame (already merged), OR
+      - a dict like {"orders": df_orders, "books": df_books} on some setups.
+
+    This helper normalizes that so the rest of the code can safely use .empty,
+    .groupby(), etc. without hitting "'dict' object has no attribute 'empty'".
+    """
+    # Case 1: already a DataFrame
+    if isinstance(raw, pd.DataFrame):
+        return raw
+
+    # Case 2: a dict containing dataframes
+    if isinstance(raw, dict):
+        if "orders" in raw and isinstance(raw["orders"], pd.DataFrame):
+            return raw["orders"]
+        if "df" in raw and isinstance(raw["df"], pd.DataFrame):
+            return raw["df"]
+
+        # If we reach here, it's a dict but without a usable DataFrame
+        raise TypeError(
+            f"load_and_clean() returned a dict, but no 'orders' or 'df' "
+            f"DataFrame was found. Keys: {list(raw.keys())}"
+        )
+
+    # Any other type is wrong
+    raise TypeError(
+        f"load_and_clean() returned unsupported type: {type(raw).__name__}"
+    )
+
+
 def process_dataset(folder_path: str) -> dict:
     """
     Load + clean dataset and compute metrics for the dashboard.
@@ -17,7 +51,11 @@ def process_dataset(folder_path: str) -> dict:
       - best_buyer_revenue (float)
       - best_buyer_aliases (list[str])
     """
-    df = load_and_clean(folder_path)
+
+    # --- load raw data and normalize to a single orders DataFrame ---
+    raw = load_and_clean(folder_path)
+    df = _extract_orders_df(raw)
+
     if df.empty:
         raise ValueError("Dataset is empty")
 
@@ -41,18 +79,20 @@ def process_dataset(folder_path: str) -> dict:
     # --- authors ---
     if "author_set" in df.columns:
         unique_author_sets = int(df["author_set"].dropna().nunique())
+
         author_rev = (
             df.dropna(subset=["author_set"])
             .groupby("author_set")["revenue_usd"]
             .sum()
             .sort_values(ascending=False)
         )
+
         popular_authors = author_rev.head(3).index.tolist()
     else:
         unique_author_sets = 0
         popular_authors = []
 
-    # --- best buyer ---
+    # --- best buyer (by user_key, using all aliases) ---
     user_rev = (
         df.groupby("user_key")["revenue_usd"]
         .sum()
@@ -66,12 +106,16 @@ def process_dataset(folder_path: str) -> dict:
     else:
         best_buyer_key = str(user_rev.index[0])
         best_buyer_revenue = float(user_rev.iloc[0])
-        best_buyer_aliases = sorted(
-            df.loc[df["user_key"] == best_buyer_key, "user_id"]
+
+        # All user_id aliases mapped to this user_key
+        best_buyer_aliases = (
+            df.loc[df["user_key"] == user_rev.index[0], "user_id"]
             .astype(str)
+            .dropna()
             .unique()
             .tolist()
         )
+        best_buyer_aliases = sorted(best_buyer_aliases)
 
     return {
         "df": df,

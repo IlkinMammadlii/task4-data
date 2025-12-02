@@ -15,7 +15,7 @@ DATASETS = {
 }
 
 st.set_page_config(
-    page_title="Task 4 – Book Store Analytics",
+    page_title="Book Store Analytics",
     layout="wide",
 )
 
